@@ -57,9 +57,40 @@ Positions are places in the text, never page numbers: each device paginates for 
 - **Opening is not reading.** A device that opens at a synced position and closes without turning a page must not push: its page start may be a little earlier than the sender's, and pushing it would walk the position backwards.
 - **No clock, no sync.** A device that does not know the time yet neither pushes nor applies.
 
+### Notes: bookmarks and highlights
+
+| Request | Body | Answer |
+|---|---|---|
+| `POST /v1/notes/<book>` | `{"items": [...], "dev": "Perch"}`: every note and tombstone this device holds for the book | `{"items": [...]}`: the merged set, which the device takes as its own |
+| `GET /v1/notes/<book>` | | `{"items": [...]}` as stored |
+
+An item is one of:
+
+```json
+{"id": 2911046633, "k": "m", "ch": 1, "rel": 121880, "len": 158592, "pct": 11, "t": 1794980583}
+{"id": 771204518, "k": "h", "ch": 1, "rel": 4310, "end": 4391, "len": 158592, "pct": 6, "t": 1794980601}
+{"id": 2911046633, "del": 1, "t": 1794981200}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | a random non-zero 32-bit number given when the note is made; it never changes |
+| `k` | `"m"` a bookmark (a page: `rel` is its page start), `"h"` a highlight (`rel` to `end`) |
+| `ch`, `rel`, `len`, `pct` | as in a position; `end` is the highlight's last byte + 1, in the same chapter |
+| `t` | when it was made, or removed, in epoch seconds |
+| `del` | `1` marks a tombstone: this note was removed |
+
+Rules:
+
+- **Merge by id.** For each id the copy with the later `t` wins; on a tie a removal wins. Nothing is lost when two devices add notes while apart.
+- **Removing leaves a tombstone.** A device that removes a note keeps `{id, del, t}` and sends it, so the removal reaches the others. The Worker forgets tombstones after 180 days; devices may cap how many they keep.
+- **One call both sends and receives.** A device posts its whole set when a book is opened and after it adds or removes a note, then replaces its set with the answer. If it changed a note while the request was out, it discards the answer and posts again.
+- **Overlapping highlights** are merged on the device that makes them, into one new item, with tombstones for the ones it replaced.
+- Up to 400 items a book.
+
 ## Storage
 
-Workers KV, one key per book per home: `<hash>:pos:<book>`, with the position in the key's metadata so that listing needs no further reads. KV is eventually consistent, which is acceptable for reading positions: two devices saving the same book within the same few seconds could briefly disagree.
+Workers KV. Positions: one key per book per home, `<hash>:pos:<book>`, with the position in the key's metadata so that listing needs no further reads. Notes: `<hash>:notes:<book>`, a JSON array as the value, written only when a merge changes it. KV is eventually consistent, which is acceptable for reading positions: two devices saving the same book within the same few seconds could briefly disagree.
 
 ## Licence
 
