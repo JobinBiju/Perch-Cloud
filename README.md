@@ -63,12 +63,13 @@ Positions are places in the text, never page numbers: each device paginates for 
 |---|---|---|
 | `POST /v1/notes/<book>` | `{"items": [...], "dev": "Perch"}`: every note and tombstone this device holds for the book | `{"items": [...]}`: the merged set, which the device takes as its own |
 | `GET /v1/notes/<book>` | | `{"items": [...]}` as stored |
+| `GET /v1/notes` | | `{"<book>": [...], ...}`: every book's notes, tombstones left out (for the portal) |
 
 An item is one of:
 
 ```json
 {"id": 2911046633, "k": "m", "ch": 1, "rel": 121880, "len": 158592, "pct": 11, "t": 1794980583}
-{"id": 771204518, "k": "h", "ch": 1, "rel": 4310, "end": 4391, "len": 158592, "pct": 6, "t": 1794980601}
+{"id": 771204518, "k": "h", "ch": 1, "rel": 4310, "end": 4391, "len": 158592, "pct": 6, "t": 1794980601, "q": "Fiction is not a lie", "n": "Compare with Sapiens", "dev": "Sticky"}
 {"id": 2911046633, "del": 1, "t": 1794981200}
 ```
 
@@ -79,12 +80,17 @@ An item is one of:
 | `ch`, `rel`, `len`, `pct` | as in a position; `end` is the highlight's last byte + 1, in the same chapter |
 | `t` | when it was made, or removed, in epoch seconds |
 | `del` | `1` marks a tombstone: this note was removed |
+| `q` | optional: the highlighted words, or the first words of a bookmarked page, as plain text (up to 600 bytes). Sent by the device that has the book, so the portal can show notes without the book |
+| `n` | optional, highlights only: the reader's own note (up to 2000 bytes); `""` when there is none. Written in the portal |
+| `dev` | optional: the device (or `"Portal"`) that last changed the item. The Worker fills it from the request's `dev` when a new or changed item has none |
 
 Rules:
 
 - **Merge by id.** For each id the copy with the later `t` wins; on a tie a removal wins. Nothing is lost when two devices add notes while apart.
 - **Removing leaves a tombstone.** A device that removes a note keeps `{id, del, t}` and sends it, so the removal reaches the others. The Worker forgets tombstones after 180 days; devices may cap how many they keep.
 - **One call both sends and receives.** A device posts its whole set when a book is opened and after it adds or removes a note, then replaces its set with the answer. If it changed a note while the request was out, it discards the answer and posts again.
+- **Leaving a field out keeps it.** A changed item without `q` or `n` keeps the stored `q` and `n`, so a device that does not store them never erases them. To clear a note, send `"n": ""`. A device should still send `q` for every item it holds when it has the book open: the Worker adds it to items stored without one.
+- **Editing a note** is a change like any other: the item with the new `n` and a later `t`.
 - **Overlapping highlights** are merged on the device that makes them, into one new item, with tombstones for the ones it replaced.
 - Up to 400 items a book.
 

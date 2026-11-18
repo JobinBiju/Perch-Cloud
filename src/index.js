@@ -6,8 +6,12 @@
 //   GET /v1/pos          every book's newest position
 //   POST /v1/notes/<book>  {items: [...], dev}   merge this device's bookmarks and highlights into the stored set
 //   GET /v1/notes/<book>   the stored set
-// A note item is {id, k: "m" bookmark | "h" highlight, ch, rel, end (highlights), len, pct, t}, or a tombstone
-// {id, del: 1, t} for one that was removed. Sets merge by id: the copy with the later t wins, a removal beating a tie.
+//   GET /v1/notes          every book's set, tombstones left out: {<book>: [...]}
+// A note item is {id, k: "m" bookmark | "h" highlight, ch, rel, end (highlights), len, pct, t, q, n, dev}, or a tombstone
+// {id, del: 1, t} for one that was removed. q: the highlighted words or a bookmarked page's first words; n: the reader's
+// own note on a highlight ("" when there is none); dev: the device that last changed it. Sets merge by id: the copy with
+// the later t wins, a removal beating a tie. A copy that leaves out q or n keeps the stored one, so a device that does
+// not know those fields never erases them.
 // <book> is the book's file name on the devices. ch = chapter index, rel/len = bytes into the chapter and its length
 // (devices scale by len, so differently converted copies still land on the same paragraph), t = epoch seconds.
 const CORS = {"access-control-allow-origin": "*", "access-control-allow-methods": "GET, PUT, POST, OPTIONS", "access-control-allow-headers": "authorization, content-type"};
@@ -17,7 +21,8 @@ async function homeOf(key) {
   return [...new Uint8Array(d)].slice(0, 16).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
-const MAX_NOTES = 400, TOMB_DAYS = 180;
+const MAX_NOTES = 400, TOMB_DAYS = 180, MAX_Q = 600, MAX_N = 2000;
+const str = (v, n) => typeof v === "string" ? v.slice(0, n) : undefined;
 // one item as stored, or null when it is not a valid note or tombstone
 function cleanNote(n) {
   if (!n || !int(n.id, 1, 0xFFFFFFFF) || !int(n.t, 0, 4102444800)) return null;
@@ -25,6 +30,8 @@ function cleanNote(n) {
   if ((n.k !== "m" && n.k !== "h") || !int(n.ch, 0, 4096) || !int(n.rel, 0, 1 << 30) || !int(n.len, 0, 1 << 30)) return null;
   const o = {id: n.id, k: n.k, ch: n.ch, rel: n.rel, len: n.len, pct: int(n.pct, 0, 100) ? n.pct : 0, t: n.t};
   if (n.k === "h") { if (!int(n.end, n.rel + 1, 1 << 30)) return null; o.end = n.end; }
+  const q = str(n.q, MAX_Q), t = str(n.n, MAX_N), d = str(n.dev, 32);
+  if (q !== undefined) o.q = q; if (t !== undefined && n.k === "h") o.n = t; if (d) o.dev = d;
   return o;
 }
 async function notes(req, env, name) {
@@ -34,10 +41,15 @@ async function notes(req, env, name) {
   let b; try { b = await req.json(); } catch (e) { return json({error: "bad json"}, 400); }
   if (!Array.isArray(b.items) || b.items.length > MAX_NOTES) return json({error: "bad items"}, 400);
   const by = new Map(stored.map(n => [n.id, n]));
+  const dev = str(b.dev, 32) || "";
   for (const raw of b.items) {
     const n = cleanNote(raw); if (!n) continue;
     const cur = by.get(n.id);
-    if (!cur || n.t > cur.t || (n.t === cur.t && n.del && !cur.del)) by.set(n.id, n);
+    if (!cur || n.t > cur.t || (n.t === cur.t && n.del && !cur.del)) {
+      if (!n.del && cur && !cur.del) { if (n.q === undefined && cur.q !== undefined) n.q = cur.q; if (n.n === undefined && cur.n !== undefined) n.n = cur.n; }
+      if (!n.del && !n.dev && dev) n.dev = dev;
+      by.set(n.id, n);
+    } else if (!n.del && !cur.del && cur.q === undefined && n.q !== undefined) by.set(n.id, {...cur, q: n.q});   // words for a note stored before devices sent them
   }
   const old = Math.floor(Date.now() / 1000) - TOMB_DAYS * 86400;   // a removal is remembered long enough to reach every device
   let merged = [...by.values()].filter(n => !n.del || n.t > old).sort((a, b) => a.id - b.id);
@@ -54,6 +66,14 @@ export default {
     const key = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || url.searchParams.get("k") || "";
     if (key.length < 24 || key.length > 128) return json({error: "home key required"}, 401);
     const home = await homeOf(key);
+    if (url.pathname === "/v1/notes") {   // every book's notes, for the portal
+      if (req.method !== "GET") return json({error: "method"}, 405);
+      const prefix = home + ":notes:", names = []; let cursor;
+      do { const l = await env.PERCH.list({prefix, cursor}); for (const k of l.keys) names.push(k.name); cursor = l.list_complete ? null : l.cursor; } while (cursor);
+      const out = {};
+      await Promise.all(names.map(async n => { const items = JSON.parse((await env.PERCH.get(n)) || "[]").filter(i => !i.del); if (items.length) out[n.slice(prefix.length)] = items; }));
+      return json(out);
+    }
     const nm = /^\/v1\/notes\/([A-Za-z0-9._-]{1,64})$/.exec(url.pathname);
     if (nm) return notes(req, env, home + ":notes:" + nm[1]);
     const m = /^\/v1\/pos(?:\/([A-Za-z0-9._-]{1,64}))?$/.exec(url.pathname);
